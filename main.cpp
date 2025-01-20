@@ -598,26 +598,126 @@ void testRCCL5() {
   std::cout << "[INFO]: RCCL test completed successfully." << std::endl;
 }
 
+
+void testRCCL6() {
+    int nDevices;
+    HIP_CHECK(hipGetDeviceCount(&nDevices));
+    std::cout << "Number of devices: " << nDevices << std::endl;
+
+    if (nDevices < 2) {
+        std::cerr << "This test requires at least 2 GPU devices" << std::endl;
+        return;
+    }
+
+    std::vector<ncclComm_t> comms(nDevices);
+    std::vector<hipStream_t> streams(nDevices);
+    std::vector<int> devs(nDevices);
+
+    // Initialisation de RCCL
+    ncclUniqueId id;
+    RCCL_CHECK(ncclGetUniqueId(&id));
+
+    for (int i = 0; i < nDevices; i++) {
+        devs[i] = i;
+        HIP_CHECK(hipSetDevice(i));
+        HIP_CHECK(hipStreamCreate(&streams[i]));
+    }
+
+    RCCL_CHECK(ncclCommInitAll(comms.data(), nDevices, devs.data()));
+
+    const int count = 4;
+    std::vector<float*> sendbuffs(nDevices);
+    std::vector<float*> recvbuffs(nDevices);
+
+    for (int i = 0; i < nDevices; i++) {
+        HIP_CHECK(hipSetDevice(i));
+        HIP_CHECK(hipMalloc(&sendbuffs[i], count * sizeof(float)));
+        HIP_CHECK(hipMalloc(&recvbuffs[i], count * sizeof(float)));
+
+        std::vector<float> h_sendbuff(count, i + 1.0f);
+        HIP_CHECK(hipMemcpy(sendbuffs[i], h_sendbuff.data(), count * sizeof(float), hipMemcpyHostToDevice));
+    }
+
+
+    // Broadcast
+    std::cout << "Performing Broadcast..." << std::endl;
+    int root = 0;  // Le GPU source pour le broadcast
+    for (int i = 0; i < nDevices; i++) {
+        HIP_CHECK(hipSetDevice(i));
+        RCCL_CHECK(ncclBroadcast(sendbuffs[root], recvbuffs[i], count, ncclFloat, root, comms[i], streams[i]));
+    }
+
+
+/*
+    // Broadcast (plus simple que AllReduce)
+    std::cout << "Performing Broadcast..." << std::endl;
+    RCCL_CHECK(ncclGroupStart());
+    for (int i = 0; i < nDevices; i++) {
+        RCCL_CHECK(ncclBroadcast(sendbuffs[0], recvbuffs[i], count, ncclFloat, 0, comms[i], streams[i]));
+    }
+    RCCL_CHECK(ncclGroupEnd());
+*/
+/* ERROR
+    // ncclAllReduce
+    std::cout << "Performing AllReduce..." << std::endl;
+    RCCL_CHECK(ncclGroupStart());
+    for (int i = 0; i < nDevices; i++) {
+        RCCL_CHECK(ncclAllReduce(sendbuffs[i], recvbuffs[i], count, ncclFloat, ncclSum, comms[i], streams[i]));
+    }
+    RCCL_CHECK(ncclGroupEnd());
+*/
+
+    // Synchronisation explicite après l'opération collective
+    for (int i = 0; i < nDevices; i++) {
+        HIP_CHECK(hipSetDevice(i));
+        HIP_CHECK(hipStreamSynchronize(streams[i]));
+    }
+
+    std::cout << "Broadcast completed. Verifying results..." << std::endl;
+
+    // Synchronisation et vérification
+    for (int i = 0; i < nDevices; i++) {
+        HIP_CHECK(hipSetDevice(i));
+        HIP_CHECK(hipStreamSynchronize(streams[i]));
+
+        std::vector<float> h_recvbuff(count);
+        HIP_CHECK(hipMemcpy(h_recvbuff.data(), recvbuffs[i], count * sizeof(float), hipMemcpyDeviceToHost));
+
+        std::cout << "Device " << i << " received: ";
+        for (int j = 0; j < count; j++) {
+            std::cout << h_recvbuff[j] << " ";
+        }
+        std::cout << std::endl;
+    }
+
+    // Nettoyage
+    for (int i = 0; i < nDevices; i++) {
+        HIP_CHECK(hipSetDevice(i));
+        RCCL_CHECK(ncclCommDestroy(comms[i]));
+        HIP_CHECK(hipStreamDestroy(streams[i]));
+        HIP_CHECK(hipFree(sendbuffs[i]));
+        HIP_CHECK(hipFree(recvbuffs[i]));
+    }
+
+    std::cout << "Test completed successfully" << std::endl;
+}
+
 int main(int argc, char *argv[]) {
-
-  // testCheckOverlap();
-
   bool isPreheating = false;
+  int  numSubProg=10;
 
   if (argc > 1)
-    isPreheating = bool(atoi(argv[1]));
-  // std::cout<<argv[1];
+    numSubProg = atoi(argv[1]);
 
   std::cout << "\n";
-  if (isPreheating)
-    // runPreheatingGPU(0);
-    runScanPreheatingGPU();
+  if (isPreheating) runScanPreheatingGPU();
   std::cout << "\n";
 
   // testRCCL2();
   // testRCCL3();
-  testRCCL4();
-  // testRCCL5();
+  if (numSubProg==4) testRCCL4();
+  if (numSubProg==5) testRCCL5();
+  if (numSubProg==6) testRCCL6();
   // testRCCL6();
   std::cout << "[INFO]: WELL DONE :-) FINISHED !\n";
   return 0;
