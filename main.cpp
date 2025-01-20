@@ -49,8 +49,6 @@
 
 #include <rccl.h> // For multi-GPU
 
-
-
 #include <random>
 
 #define HIP_CHECK(cmd)                                                         \
@@ -73,7 +71,6 @@
     }                                                                          \
   } while (0)
 
-
 __global__ void onKernelNothing(float4 *nothing) {
   // nothing void
 }
@@ -81,7 +78,7 @@ __global__ void onKernelNothing(float4 *nothing) {
 void runScanPreheatingGPU() {
   int nDevices;
   hipGetDeviceCount(&nDevices);
-  for (int i = 0; i < nDevices; ++i) { 
+  for (int i = 0; i < nDevices; ++i) {
     hipSetDevice(i);
     float4 *d_nothing;
     hipMalloc(&d_nothing, 100 * sizeof(float4));
@@ -89,8 +86,6 @@ void runScanPreheatingGPU() {
     hipFree(d_nothing);
   }
 }
-
-
 
 void testRCCL() {
   ncclComm_t comm;
@@ -458,146 +453,150 @@ void testRCCL4() {
 }
 
 void testRCCL5() {
-    std::cout << "[INFO]: RCCL test with vector fragmentation, reconstruction, and collective operations\n";
+  std::cout << "[INFO]: RCCL test with vector fragmentation, reconstruction, "
+               "and collective operations\n";
 
-    // Initialization of devices
-    int nDevices;
-    HIP_CHECK(hipGetDeviceCount(&nDevices));
-    std::cout << "[INFO]: Number of devices: " << nDevices << std::endl;
+  // Initialization of devices
+  int nDevices;
+  HIP_CHECK(hipGetDeviceCount(&nDevices));
+  std::cout << "[INFO]: Number of devices: " << nDevices << std::endl;
 
-    // Creation of the initial vector
-    const int vectorSize = 300;
-    std::vector<float> initialVector(vectorSize);
-    for (int i = 0; i < vectorSize; ++i) {
-        initialVector[i] = static_cast<float>(i);
-    }
-    std::cout << "[INFO]: Initial vector created." << std::endl;
+  // Creation of the initial vector
+  const int vectorSize = 300;
+  std::vector<float> initialVector(vectorSize);
+  for (int i = 0; i < vectorSize; ++i) {
+    initialVector[i] = static_cast<float>(i);
+  }
+  std::cout << "[INFO]: Initial vector created." << std::endl;
 
-    // Calculation of fragment size
-    int fragmentSize = vectorSize / nDevices;
-    int lastFragmentSize = fragmentSize + (vectorSize % nDevices);
+  // Calculation of fragment size
+  int fragmentSize = vectorSize / nDevices;
+  int lastFragmentSize = fragmentSize + (vectorSize % nDevices);
 
-    // Initialization of RCCL communicators
-    std::vector<ncclComm_t> comms(nDevices);
-    ncclUniqueId id;
-    RCCL_CHECK(ncclGetUniqueId(&id));
+  // Initialization of RCCL communicators
+  std::vector<ncclComm_t> comms(nDevices);
+  ncclUniqueId id;
+  RCCL_CHECK(ncclGetUniqueId(&id));
 
-    // Parallel initialization of communicators
-    RCCL_CHECK(ncclGroupStart());
-    for (int i = 0; i < nDevices; ++i) {
+  // Parallel initialization of communicators
+  RCCL_CHECK(ncclGroupStart());
+  for (int i = 0; i < nDevices; ++i) {
+    HIP_CHECK(hipSetDevice(i));
+    RCCL_CHECK(ncclCommInitRank(&comms[i], nDevices, id, i));
+  }
+  RCCL_CHECK(ncclGroupEnd());
+  std::cout << "[INFO]: RCCL communicators initialized." << std::endl;
+
+  // Allocate and copy fragments on each GPU
+  std::vector<float *> d_fragments(nDevices);
+  std::vector<float *> d_results(nDevices);
+  for (int i = 0; i < nDevices; ++i) {
+    HIP_CHECK(hipSetDevice(i));
+    int currentFragmentSize =
+        (i == nDevices - 1) ? lastFragmentSize : fragmentSize;
+    HIP_CHECK(hipMalloc(&d_fragments[i], currentFragmentSize * sizeof(float)));
+    HIP_CHECK(hipMalloc(&d_results[i], currentFragmentSize * sizeof(float)));
+    HIP_CHECK(hipMemcpy(d_fragments[i], initialVector.data() + i * fragmentSize,
+                        currentFragmentSize * sizeof(float),
+                        hipMemcpyHostToDevice));
+  }
+  std::cout << "[INFO]: Fragments allocated and copied to GPUs." << std::endl;
+
+  for (int i = 0; i < nDevices; ++i) {
+    HIP_CHECK(hipSetDevice(i));
+    HIP_CHECK(hipDeviceSynchronize());
+    std::cout << "Syncronisation " << i << std::endl;
+  }
+
+  // Collective operations
+  RCCL_CHECK(ncclGroupStart());
+  for (int i = 0; i < nDevices; ++i) {
+    // HIP_CHECK(hipSetDevice(i));
+    int currentFragmentSize =
+        (i == nDevices - 1) ? lastFragmentSize : fragmentSize;
+    RCCL_CHECK(ncclAllReduce(d_fragments[i], d_results[i], currentFragmentSize,
+                             ncclFloat, ncclSum, comms[i], nullptr));
+  }
+  RCCL_CHECK(ncclGroupEnd());
+  std::cout << "[INFO]: AllReduce operation completed." << std::endl;
+
+  for (int i = 0; i < nDevices; ++i) {
+    HIP_CHECK(hipSetDevice(i));
+    size_t free, total;
+    HIP_CHECK(hipMemGetInfo(&free, &total));
+    std::cout << "Device " << i << " memory: " << free << " / " << total
+              << " bytes free" << std::endl;
+  }
+
+  /*
+      for (int i = 0; i < nDevices; ++i) {
         HIP_CHECK(hipSetDevice(i));
-        RCCL_CHECK(ncclCommInitRank(&comms[i], nDevices, id, i));
-    }
-    RCCL_CHECK(ncclGroupEnd());
-    std::cout << "[INFO]: RCCL communicators initialized." << std::endl;
+        HIP_CHECK(hipDeviceSynchronize());
+      }
+      std::cout << "[INFO]: Synchronisation completed." << std::endl;
+  */
 
-    // Allocate and copy fragments on each GPU
-    std::vector<float*> d_fragments(nDevices);
-    std::vector<float*> d_results(nDevices);
-    for (int i = 0; i < nDevices; ++i) {
-        HIP_CHECK(hipSetDevice(i));
-        int currentFragmentSize = (i == nDevices - 1) ? lastFragmentSize : fragmentSize;
-        HIP_CHECK(hipMalloc(&d_fragments[i], currentFragmentSize * sizeof(float)));
-        HIP_CHECK(hipMalloc(&d_results[i], currentFragmentSize * sizeof(float)));
-        HIP_CHECK(hipMemcpy(d_fragments[i], initialVector.data() + i * fragmentSize,
-                            currentFragmentSize * sizeof(float), hipMemcpyHostToDevice));
-    }
-    std::cout << "[INFO]: Fragments allocated and copied to GPUs." << std::endl;
+  // Vector reconstruction
+  std::vector<float> reconstructedVector(vectorSize);
+  for (int i = 0; i < nDevices; ++i) {
+    HIP_CHECK(hipSetDevice(i));
+    int currentFragmentSize =
+        (i == nDevices - 1) ? lastFragmentSize : fragmentSize;
+    HIP_CHECK(hipMemcpy(reconstructedVector.data() + i * fragmentSize,
+                        d_results[i], currentFragmentSize * sizeof(float),
+                        hipMemcpyDeviceToHost));
+  }
 
-
-    for (int i = 0; i < nDevices; ++i) {
-      HIP_CHECK(hipSetDevice(i));
-      HIP_CHECK(hipDeviceSynchronize());
-      std::cout << "Syncronisation " << i << std::endl;
-    }
-
-    // Collective operations
-    RCCL_CHECK(ncclGroupStart());
-    for (int i = 0; i < nDevices; ++i) {
-        //HIP_CHECK(hipSetDevice(i));
-        int currentFragmentSize = (i == nDevices - 1) ? lastFragmentSize : fragmentSize;
-        RCCL_CHECK(ncclAllReduce(d_fragments[i], d_results[i], currentFragmentSize,
-                                 ncclFloat, ncclSum, comms[i], nullptr));
-    }
-    RCCL_CHECK(ncclGroupEnd());
-    std::cout << "[INFO]: AllReduce operation completed." << std::endl;
-
-
-    for (int i = 0; i < nDevices; ++i) {
-      HIP_CHECK(hipSetDevice(i));
-      size_t free, total;
-      HIP_CHECK(hipMemGetInfo(&free, &total));
-      std::cout << "Device " << i << " memory: " << free << " / " << total << " bytes free" << std::endl;
-    }
-
-
-/*
-    for (int i = 0; i < nDevices; ++i) {
-      HIP_CHECK(hipSetDevice(i));
-      HIP_CHECK(hipDeviceSynchronize());
-    }
-    std::cout << "[INFO]: Synchronisation completed." << std::endl;
+  /*
+   std::vector<float> reconstructedVector(vectorSize);
+   std::vector<hipStream_t> streams(nDevices);
+   for (int i = 0; i < nDevices; ++i) {
+       HIP_CHECK(hipSetDevice(i));
+       HIP_CHECK(hipStreamCreate(&streams[i]));
+       int currentFragmentSize = (i == nDevices - 1) ? lastFragmentSize :
+   fragmentSize; HIP_CHECK(hipMemcpyAsync(reconstructedVector.data() + i *
+   fragmentSize, d_results[i], currentFragmentSize * sizeof(float),
+   hipMemcpyDeviceToHost, streams[i]));
+   }
+   for (int i = 0; i < nDevices; ++i) {
+       HIP_CHECK(hipSetDevice(i));
+       HIP_CHECK(hipStreamSynchronize(streams[i]));
+       HIP_CHECK(hipStreamDestroy(streams[i]));
+   }
 */
 
-    // Vector reconstruction
-    std::vector<float> reconstructedVector(vectorSize);
-    for (int i = 0; i < nDevices; ++i) {
-        HIP_CHECK(hipSetDevice(i));
-        int currentFragmentSize = (i == nDevices - 1) ? lastFragmentSize : fragmentSize;
-        HIP_CHECK(hipMemcpy(reconstructedVector.data() + i * fragmentSize, d_results[i],
-                            currentFragmentSize * sizeof(float), hipMemcpyDeviceToHost));
-    }
-    
+  std::cout << "[INFO]: Vector reconstructed." << std::endl;
 
-   /*
-    std::vector<float> reconstructedVector(vectorSize);
-    std::vector<hipStream_t> streams(nDevices);
-    for (int i = 0; i < nDevices; ++i) {
-        HIP_CHECK(hipSetDevice(i));
-        HIP_CHECK(hipStreamCreate(&streams[i]));
-        int currentFragmentSize = (i == nDevices - 1) ? lastFragmentSize : fragmentSize;
-        HIP_CHECK(hipMemcpyAsync(reconstructedVector.data() + i * fragmentSize, d_results[i],
-                                currentFragmentSize * sizeof(float), hipMemcpyDeviceToHost, streams[i]));
+  // Verification
+  bool correct = true;
+  float expectedSum = nDevices * (vectorSize - 1) * vectorSize / 2.0f;
+  for (int i = 0; i < vectorSize; ++i) {
+    if (std::abs(reconstructedVector[i] - expectedSum) > 1e-5) {
+      correct = false;
+      std::cout << "Mismatch at index " << i << ": " << reconstructedVector[i]
+                << " (expected " << expectedSum << ")" << std::endl;
+      break;
     }
-    for (int i = 0; i < nDevices; ++i) {
-        HIP_CHECK(hipSetDevice(i));
-        HIP_CHECK(hipStreamSynchronize(streams[i]));
-        HIP_CHECK(hipStreamDestroy(streams[i]));
-    }
-*/
+  }
 
-    std::cout << "[INFO]: Vector reconstructed." << std::endl;
+  if (correct) {
+    std::cout << "[INFO]: Verification passed. All values are correct."
+              << std::endl;
+  } else {
+    std::cout << "[ERROR]: Verification failed. Some values are incorrect."
+              << std::endl;
+  }
 
-    // Verification
-    bool correct = true;
-    float expectedSum = nDevices * (vectorSize - 1) * vectorSize / 2.0f;
-    for (int i = 0; i < vectorSize; ++i) {
-        if (std::abs(reconstructedVector[i] - expectedSum) > 1e-5) {
-            correct = false;
-            std::cout << "Mismatch at index " << i << ": " << reconstructedVector[i]
-                      << " (expected " << expectedSum << ")" << std::endl;
-            break;
-        }
-    }
+  // Cleanup
+  for (int i = 0; i < nDevices; ++i) {
+    HIP_CHECK(hipSetDevice(i));
+    HIP_CHECK(hipFree(d_fragments[i]));
+    HIP_CHECK(hipFree(d_results[i]));
+    RCCL_CHECK(ncclCommDestroy(comms[i]));
+  }
 
-    if (correct) {
-        std::cout << "[INFO]: Verification passed. All values are correct." << std::endl;
-    } else {
-        std::cout << "[ERROR]: Verification failed. Some values are incorrect." << std::endl;
-    }
-
-    // Cleanup
-    for (int i = 0; i < nDevices; ++i) {
-        HIP_CHECK(hipSetDevice(i));
-        HIP_CHECK(hipFree(d_fragments[i]));
-        HIP_CHECK(hipFree(d_results[i]));
-        RCCL_CHECK(ncclCommDestroy(comms[i]));
-    }
-
-    std::cout << "[INFO]: RCCL test completed successfully." << std::endl;
+  std::cout << "[INFO]: RCCL test completed successfully." << std::endl;
 }
-
-
 
 int main(int argc, char *argv[]) {
 
@@ -611,17 +610,15 @@ int main(int argc, char *argv[]) {
 
   std::cout << "\n";
   if (isPreheating)
-    //runPreheatingGPU(0);
+    // runPreheatingGPU(0);
     runScanPreheatingGPU();
   std::cout << "\n";
 
   // testRCCL2();
   // testRCCL3();
-     testRCCL4();
+  testRCCL4();
   // testRCCL5();
   // testRCCL6();
   std::cout << "[INFO]: WELL DONE :-) FINISHED !\n";
   return 0;
 }
-
-
